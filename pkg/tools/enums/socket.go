@@ -22,6 +22,7 @@ import "fmt"
 const (
 	unknown = "unknown"
 	http    = "http"
+	mysql   = "MySQL"
 )
 
 var SocketFamilyUnknown = uint8(0xff)
@@ -98,6 +99,7 @@ const (
 	ConnectionProtocolUnknown ConnectionProtocol = 0
 	ConnectionProtocolHTTP    ConnectionProtocol = 1
 	ConnectionProtocolHTTP2   ConnectionProtocol = 2
+	ConnectionProtocolMySQL   ConnectionProtocol = 3
 )
 
 func (c ConnectionProtocol) String() string {
@@ -108,6 +110,8 @@ func (c ConnectionProtocol) String() string {
 		return http
 	case ConnectionProtocolHTTP2:
 		return http
+	case ConnectionProtocolMySQL:
+		return mysql
 	default:
 		return unknown
 	}

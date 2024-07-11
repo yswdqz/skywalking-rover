@@ -20,10 +20,107 @@
 #define CONNECTION_PROTOCOL_UNKNOWN 0
 #define CONNECTION_PROTOCOL_HTTP1 1
 #define CONNECTION_PROTOCOL_HTTP2 2
+#define CONNECTION_PROTOCOL_MYSQL 3
+
 
 #define CONNECTION_MESSAGE_TYPE_UNKNOWN 0
 #define CONNECTION_MESSAGE_TYPE_REQUEST 1
 #define CONNECTION_MESSAGE_TYPE_RESPONSE 2
+
+#define MYSQL_MESSAGE_TYPE_UNKNOWN 0
+#define MYSQL_MESSAGE_TYPE_REQUEST 1
+#define MYSQL_MESSAGE_TYPE_RESPONSE 2
+
+#define COM_SLEEP               0x00
+#define COM_QUIT                0x01
+#define COM_INIT_DB             0x02
+#define COM_QUERY               0x03
+#define COM_FIELD_LIST          0x04
+#define COM_CREATE_DB           0x05
+#define COM_DROP_DB             0x06
+#define COM_REFRESH             0x07
+#define COM_SHUTDOWN            0x08
+#define COM_STATISTICS          0x09
+#define COM_PROCESS_INFO        0x0A
+#define COM_CONNECT             0x0B
+#define COM_PROCESS_KILL        0x0C
+#define COM_DEBUG               0x0D
+#define COM_PING                0x0E
+#define COM_TIME                0x0F
+#define COM_DELAYED_INSERT      0x10
+#define COM_CHANGE_USER         0x11
+#define COM_BINLOG_DUMP         0x12
+#define COM_TABLE_DUMP          0x13
+#define COM_CONNECT_OUT         0x14
+#define COM_REGISTER_SLAVE      0x15
+#define COM_STMT_PREPARE        0x16
+#define COM_STMT_EXECUTE        0x17
+#define COM_STMT_SEND_LONG_DATA 0x18
+#define COM_STMT_CLOSE          0x19
+#define COM_STMT_RESET          0x1A
+#define COM_SET_OPTION          0x1B
+#define COM_STMT_FETCH          0x1C
+
+#define RESPONSE_OK_PACKET      0x00
+#define RESPONSE_ERR_PACKET     0xFF
+#define RESPONSE_EOF_PACKET     0xFE
+
+static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
+    if (count < 4) {
+        return MYSQL_MESSAGE_TYPE_UNKNOWN;
+    }
+
+    // 读取包长度
+    uint32_t packet_length = ((uint8_t)buf[0]) | (((uint8_t)buf[1]) << 8) | (((uint8_t)buf[2]) << 16);
+
+    if (count < packet_length + 4) {
+        return MYSQL_MESSAGE_TYPE_UNKNOWN;
+    }
+
+    // 读取负载数据的第一个字节来判断消息类型
+    uint8_t message_type = (uint8_t)buf[4];
+
+    // 判断是否为响应类型
+    if (message_type == RESPONSE_OK_PACKET || message_type == RESPONSE_ERR_PACKET || message_type == RESPONSE_EOF_PACKET) {
+        return MYSQL_MESSAGE_TYPE_RESPONSE;
+    }
+
+    // 判断是否为请求类型
+    switch (message_type) {
+        case COM_SLEEP:
+        case COM_QUIT:
+        case COM_INIT_DB:
+        case COM_QUERY:
+        case COM_FIELD_LIST:
+        case COM_CREATE_DB:
+        case COM_DROP_DB:
+        case COM_REFRESH:
+        case COM_SHUTDOWN:
+        case COM_STATISTICS:
+        case COM_PROCESS_INFO:
+        case COM_CONNECT:
+        case COM_PROCESS_KILL:
+        case COM_DEBUG:
+        case COM_PING:
+        case COM_TIME:
+        case COM_DELAYED_INSERT:
+        case COM_CHANGE_USER:
+        case COM_BINLOG_DUMP:
+        case COM_TABLE_DUMP:
+        case COM_CONNECT_OUT:
+        case COM_REGISTER_SLAVE:
+        case COM_STMT_PREPARE:
+        case COM_STMT_EXECUTE:
+        case COM_STMT_SEND_LONG_DATA:
+        case COM_STMT_CLOSE:
+        case COM_STMT_RESET:
+        case COM_SET_OPTION:
+        case COM_STMT_FETCH:
+            return MYSQL_MESSAGE_TYPE_REQUEST;
+        default:
+            return MYSQL_MESSAGE_TYPE_UNKNOWN;
+    }
+}
 
 // HTTP 1.x
 // request frame format: https://www.rfc-editor.org/rfc/rfc2068.html#section-5
@@ -176,6 +273,8 @@ static __inline __u32 analyze_protocol(char *buf, __u32 count, __u8 *protocol_re
         protocol = CONNECTION_PROTOCOL_HTTP1;
     } else if ((type = infer_http2_message(buf, count)) != CONNECTION_PROTOCOL_UNKNOWN) {
         protocol = CONNECTION_PROTOCOL_HTTP2;
+    } else if ((type = infer_mysql_message(buf, count)) != CONNECTION_PROTOCOL_UNKNOWN) {
+        protocol = CONNECTION_PROTOCOL_MYSQL;
     }
 
     if (protocol != CONNECTION_PROTOCOL_UNKNOWN) {

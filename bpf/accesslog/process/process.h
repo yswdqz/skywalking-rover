@@ -25,9 +25,10 @@ struct {
 } process_monitor_control SEC(".maps");
 
 static __inline bool tgid_should_trace(__u32 tgid) {
-    __u32 *val = bpf_map_lookup_elem(&process_monitor_control, &tgid);
-    if (!val) {
-        return false;
-    }
-    return (*val) == 1 ? true : false;
+//    __u32 *val = bpf_map_lookup_elem(&process_monitor_control, &tgid);
+//    if (!val) {
+//        return false;
+//    }
+//    return (*val) == 1 ? true : false;
+    return true;
 }
