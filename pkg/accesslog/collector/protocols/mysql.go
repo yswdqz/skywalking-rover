@@ -3,14 +3,10 @@ package protocols
 import (
 	"container/list"
 	"github.com/apache/skywalking-rover/pkg/accesslog/common"
-	"github.com/apache/skywalking-rover/pkg/accesslog/events"
-	"github.com/apache/skywalking-rover/pkg/accesslog/forwarder"
 	"github.com/apache/skywalking-rover/pkg/logger"
 	"github.com/apache/skywalking-rover/pkg/profiling/task/network/analyze/layer7/protocols/mysql/reader"
 	"github.com/apache/skywalking-rover/pkg/tools/buffer"
 	"github.com/apache/skywalking-rover/pkg/tools/enums"
-	"io"
-	v3 "skywalking.apache.org/repo/goapi/collect/ebpf/accesslog/v3"
 )
 
 var mysqllog = logger.GetLogger("accesslog", "collector", "protocols", "mysql")
@@ -85,14 +81,13 @@ func (p *MySQLProtocol) Analyze(metrics ProtocolMetrics, buf *buffer.Buffer, _ *
 }
 
 func (p *MySQLProtocol) handleRequest(metrics ProtocolMetrics, buf *buffer.Buffer) (enums.ParseResult, error) {
-	req, result, err := reader.ReadRequest(buf, true)
+	_, result, err := reader.ReadRequest(buf)
 	if err != nil {
 		return enums.ParseResultSkipPackage, err
 	}
 	if result != enums.ParseResultSuccess {
 		return result, nil
 	}
-	metrics.(*MySQLMetrics).appendRequestToList(req)
 	return result, nil
 }
 
@@ -105,7 +100,7 @@ func (p *MySQLProtocol) handleResponse(metrics ProtocolMetrics, b *buffer.Buffer
 	request := MySQLMetrics.halfRequests.Remove(firstRequest).(*reader.Request)
 
 	// parsing response
-	response, result, err := reader.ReadResponse(request, b, true)
+	_, result, err := reader.ReadResponse(request, b, true)
 	defer func() {
 		// if parsing response failed, then put the request back to the list
 		if result != enums.ParseResultSuccess {
@@ -118,108 +113,5 @@ func (p *MySQLProtocol) handleResponse(metrics ProtocolMetrics, b *buffer.Buffer
 		return result, nil
 	}
 
-	// getting the request and response, then send to the forwarder
-	p.handleHTTPData(MySQLMetrics, request, response)
 	return enums.ParseResultSuccess, nil
-}
-
-func (p *MySQLProtocol) handleHTTPData(metrics *MySQLMetrics, request *reader.Request, response *reader.Response) {
-	detailEvents := make([]*events.SocketDetailEvent, 0)
-	detailEvents = appendSocketDetailsFromBuffer(detailEvents, request.HeaderBuffer())
-	detailEvents = appendSocketDetailsFromBuffer(detailEvents, request.BodyBuffer())
-	detailEvents = appendSocketDetailsFromBuffer(detailEvents, response.HeaderBuffer())
-	detailEvents = appendSocketDetailsFromBuffer(detailEvents, response.BodyBuffer())
-
-	if len(detailEvents) == 0 {
-		mysqllog.Warnf("cannot found any detail events for HTTP/1.x protocol, data id: %d-%d",
-			request.MinDataID(), response.BodyBuffer().LastSocketBuffer().DataID())
-		return
-	}
-	mysqllog.Debugf("found fully MYSQL request and response, contains %d detail events , connection ID: %d, random ID: %d",
-		len(detailEvents), metrics.connectionID, metrics.randomID)
-	originalRequest := request.Original()
-	originalResponse := response.Original()
-
-	defer func() {
-		p.closeStream(originalRequest.Body)
-		p.closeStream(originalResponse.Body)
-	}()
-	forwarder.SendTransferProtocolEvent(p.ctx, detailEvents, &v3.AccessLogProtocolLogs{
-		Protocol: &v3.AccessLogProtocolLogs_Http{
-			Http: &v3.AccessLogHTTPProtocol{
-				StartTime: forwarder.BuildOffsetTimestamp(detailEvents[0].StartTime),
-				EndTime:   forwarder.BuildOffsetTimestamp(detailEvents[len(detailEvents)-1].EndTime),
-				Version:   v3.AccessLogHTTPProtocolVersion_MYSQL,
-				Request: &v3.AccessLogHTTPProtocolRequest{
-					Method:             transformHTTPMethod(originalRequest.Method),
-					Path:               originalRequest.URL.Path,
-					SizeOfHeadersBytes: uint64(request.HeaderBuffer().DataSize()),
-					SizeOfBodyBytes:    uint64(request.BodyBuffer().DataSize()),
-
-					Trace: analyzeTraceInfo(func(key string) string {
-						return originalRequest.Header.Get(key)
-					}, mysqllog),
-				},
-				Response: &v3.AccessLogHTTPProtocolResponse{
-					StatusCode:         int32(originalResponse.StatusCode),
-					SizeOfHeadersBytes: uint64(response.HeaderBuffer().DataSize()),
-					SizeOfBodyBytes:    uint64(response.BodyBuffer().DataSize()),
-				},
-			},
-		},
-	})
-}
-
-func (p *MySQLProtocol) closeStream(ioReader io.Closer) {
-	if ioReader != nil {
-		_ = ioReader.Close()
-	}
-}
-
-func transformHTTPMethod(method string) v3.AccessLogHTTPProtocolRequestMethod {
-	switch method {
-	case "GET":
-		return v3.AccessLogHTTPProtocolRequestMethod_Get
-	case "POST":
-		return v3.AccessLogHTTPProtocolRequestMethod_Post
-	case "PUT":
-		return v3.AccessLogHTTPProtocolRequestMethod_Put
-	case "DELETE":
-		return v3.AccessLogHTTPProtocolRequestMethod_Delete
-	case "HEAD":
-		return v3.AccessLogHTTPProtocolRequestMethod_Head
-	case "OPTIONS":
-		return v3.AccessLogHTTPProtocolRequestMethod_Options
-	case "TRACE":
-		return v3.AccessLogHTTPProtocolRequestMethod_Trace
-	case "CONNECT":
-		return v3.AccessLogHTTPProtocolRequestMethod_Connect
-	case "PATCH":
-		return v3.AccessLogHTTPProtocolRequestMethod_Patch
-	}
-	mysqllog.Warnf("unknown http method: %s", method)
-	return v3.AccessLogHTTPProtocolRequestMethod_Get
-}
-
-func (m *MySQLMetrics) appendRequestToList(req *reader.Request) {
-	if m.halfRequests.Len() == 0 {
-		m.halfRequests.PushFront(req)
-		return
-	}
-	if m.halfRequests.Back().Value.(*reader.Request).MinDataID() < req.MinDataID() {
-		m.halfRequests.PushBack(req)
-		return
-	}
-	beenAdded := false
-	for element := m.halfRequests.Front(); element != nil; element = element.Next() {
-		existEvent := element.Value.(*reader.Request)
-		if existEvent.MinDataID() > req.MinDataID() {
-			m.halfRequests.InsertBefore(req, element)
-			beenAdded = true
-			break
-		}
-	}
-	if !beenAdded {
-		m.halfRequests.PushBack(req)
-	}
 }

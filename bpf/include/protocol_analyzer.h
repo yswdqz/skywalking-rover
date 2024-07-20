@@ -71,14 +71,14 @@ static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
     }
 
     // 读取包长度
-    uint32_t packet_length = ((uint8_t)buf[0]) | (((uint8_t)buf[1]) << 8) | (((uint8_t)buf[2]) << 16);
+    __u32 packet_length = ((__u8)buf[0]) | (((__u8)buf[1]) << 8) | (((__u8)buf[2]) << 16);
 
     if (count < packet_length + 4) {
         return MYSQL_MESSAGE_TYPE_UNKNOWN;
     }
 
     // 读取负载数据的第一个字节来判断消息类型
-    uint8_t message_type = (uint8_t)buf[4];
+    __u8 message_type = (__u8)buf[4];
 
     // 判断是否为响应类型
     if (message_type == RESPONSE_OK_PACKET || message_type == RESPONSE_ERR_PACKET || message_type == RESPONSE_EOF_PACKET) {

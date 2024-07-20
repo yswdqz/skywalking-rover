@@ -2,97 +2,146 @@ package reader
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"github.com/apache/skywalking-rover/pkg/tools/buffer"
 	"github.com/apache/skywalking-rover/pkg/tools/enums"
-	"net/http"
-	"net/textproto"
-	"net/url"
-	"strings"
+	"io"
 )
 
 type Request struct {
-	*MessageOpt
-	original     *http.Request
-	headerBuffer *buffer.Buffer
-	bodyBuffer   *buffer.Buffer
+	header *Header
+	body   interface{}
+}
+type Header struct {
+	Length     uint32
+	SequenceID uint8
 }
 
-type Message interface {
-	Headers() http.Header
-	HeaderBuffer() *buffer.Buffer
-	BodyBuffer() *buffer.Buffer
+// MySQLLoginRequest 表示 MySQL 登录请求
+type MySQLLoginRequest struct {
+	Username string
+	Database string
 }
 
-type MessageOpt struct {
-	Message
+// MySQLQueryRequest 表示 MySQL 查询请求
+type MySQLQueryRequest struct {
+	Query string
+}
+type MySQLPingRequest struct{}
+
+func ParseHeader(bufReader *bufio.Reader) (*Header, error) {
+	header := Header{}
+
+	lengthBytes := make([]byte, 3)
+	if _, err := io.ReadFull(bufReader, lengthBytes); err != nil {
+		return nil, err
+	}
+
+	// 数据包长度是一个 3 字节无符号整数
+	header.Length = uint32(lengthBytes[0]) | uint32(lengthBytes[1])<<8 | uint32(lengthBytes[2])<<16
+
+	// 读取头部的第 4 字节（序列号）
+	if sequenceID, err := bufReader.ReadByte(); err != nil {
+		return nil, err
+	} else {
+		header.SequenceID = sequenceID
+	}
+
+	return &header, nil
 }
 
-func ReadRequest(buf *buffer.Buffer, readBody bool) (*Request, enums.ParseResult, error) {
+func ParseRequest(bufReader *bufio.Reader) (interface{}, *Header, error) {
+	header, err := ParseHeader(bufReader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing MySQL packet header: %w", err)
+	}
+
+	request, err := doParseRequest(bufReader, header)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error parsing MySQL request: %w", err)
+	}
+
+	return request, header, nil
+}
+
+func doParseRequest(bufReader *bufio.Reader, header *Header) (interface{}, error) {
+	commandByte, err := bufReader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	length := header.Length - 1
+
+	switch commandByte {
+	case 0x03:
+		return parseMySQLQueryRequest(bufReader, length)
+	case 0x0e:
+		return parseMySQLPingRequest(bufReader, length)
+	case 0x10:
+		return parseMySQLLoginRequest(bufReader, length)
+	default:
+		return nil, fmt.Errorf("unsupported command byte: 0x%x", commandByte)
+	}
+}
+
+func ReadRequest(buf *buffer.Buffer) (*Request, enums.ParseResult, error) {
 	bufReader := bufio.NewReader(buf)
-	tp := textproto.NewReader(bufReader)
-	req := &http.Request{}
-	result := &Request{original: req}
-	result.MessageOpt = &MessageOpt{result}
-
-	headerStartPosition := buf.Position()
-	line, err := tp.ReadLine()
+	request := &Request{}
+	req, header, err := ParseRequest(bufReader)
 	if err != nil {
-		return nil, enums.ParseResultSkipPackage, fmt.Errorf("read request first lint failure: %v", err)
+		fmt.Errorf("parse error: %w", err)
+		return nil, 0, err
 	}
-	method, rest, ok1 := strings.Cut(line, " ")
-	requestURI, proto, ok2 := strings.Cut(rest, " ")
-	if !ok1 || !ok2 {
-		return nil, enums.ParseResultSkipPackage, fmt.Errorf("the first line is not request: %s", line)
+	request.header = header
+	request.body = req
+
+	return request, enums.ParseResultSuccess, nil
+}
+
+// parseMySQLLoginRequest 解析 MySQL 登录请求
+func parseMySQLLoginRequest(bufReader *bufio.Reader, length uint32) (*MySQLLoginRequest, error) {
+	request := MySQLLoginRequest{}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(bufReader, body); err != nil {
+		return nil, err
 	}
 
-	isRequest := false
-	for _, m := range requestMethods {
-		if method == m {
-			isRequest = true
-			break
-		}
+	usernameEnd := bytes.IndexByte(body, 0x00)
+	if usernameEnd == -1 {
+		return nil, fmt.Errorf("invalid login request: no null terminator for username")
 	}
-	if !isRequest {
-		return nil, enums.ParseResultSkipPackage, fmt.Errorf("is not request: %s", method)
-	}
-	major, minor, ok := http.ParseHTTPVersion(proto)
-	if !ok {
-		return nil, enums.ParseResultSkipPackage, fmt.Errorf("the protocol version cannot be identity: %s", proto)
-	}
-	justAuthority := req.Method == "CONNECT" && !strings.HasPrefix(requestURI, "/")
-	if justAuthority {
-		requestURI = "http://" + requestURI
-	}
-	uri, err := url.ParseRequestURI(requestURI)
-	if err != nil {
-		return nil, enums.ParseResultSkipPackage, err
-	}
-	req.Method, req.URL, req.RequestURI = method, uri, requestURI
-	req.Proto, req.ProtoMajor, req.ProtoMinor = proto, major, minor
+	request.Username = string(body[:usernameEnd])
 
-	// header reader
-	mimeHeader, err := tp.ReadMIMEHeader()
-	if err != nil {
-		return nil, enums.ParseResultSkipPackage, err
+	databaseStart := usernameEnd + 1
+	if databaseStart >= int(length) {
+		return nil, fmt.Errorf("invalid login request: no database name")
 	}
-	req.Header = http.Header(mimeHeader)
+	databaseEnd := bytes.IndexByte(body[databaseStart:], 0x00)
+	if databaseEnd == -1 {
+		return nil, fmt.Errorf("invalid login request: no null terminator for database name")
+	}
+	request.Database = string(body[databaseStart : databaseStart+databaseEnd])
 
-	req.Host = req.URL.Host
-	if req.Host == "" {
-		req.Host = req.Header.Get("Host")
+	return &request, nil
+}
+
+// parseMySQLQueryRequest 解析 MySQL 查询请求
+func parseMySQLQueryRequest(bufReader *bufio.Reader, length uint32) (*MySQLQueryRequest, error) {
+	request := MySQLQueryRequest{}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(bufReader, body); err != nil {
+		return nil, err
 	}
 
-	result.buildHeaderBuffer(headerStartPosition, buf, bufReader)
-	if readBody {
-		if b, r, err := result.readFullBody(bufReader, buf); err != nil {
-			return nil, enums.ParseResultSkipPackage, err
-		} else if r != enums.ParseResultSuccess {
-			return nil, r, nil
-		} else {
-			result.bodyBuffer = b
-		}
-	}
+	request.Query = string(body)
+	return &request, nil
+}
 
-	return result, enums.ParseResultSuccess, nil
+// parseMySQLPingRequest 解析 MySQL Ping 请求
+func parseMySQLPingRequest(bufReader *bufio.Reader, length uint32) (*MySQLPingRequest, error) {
+	if _, err := bufReader.Discard(int(length)); err != nil {
+		return nil, err
+	}
+	return &MySQLPingRequest{}, nil
 }
