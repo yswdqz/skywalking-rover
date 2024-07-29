@@ -78,8 +78,10 @@ func IdentityMessageType(reader *buffer.Buffer) (MessageType, error) {
 
 	// 读取完整的数据包
 	packetBuffer := make([]byte, packetLength+headerSize)
-	_, err = reader.Read(packetBuffer)
-	if err != nil {
+
+	length, err := reader.Read(packetBuffer)
+
+	if err != nil || length <= 4 {
 		return MessageTypeUnknown, err
 	}
 
