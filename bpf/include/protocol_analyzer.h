@@ -82,7 +82,7 @@ static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
 
     // 判断是否为响应类型
     if (message_type == RESPONSE_OK_PACKET || message_type == RESPONSE_ERR_PACKET || message_type == RESPONSE_EOF_PACKET) {
-        bpf_trace_printk("found mysql response");
+        bpf_trace_printk("found mysql request:%u\n", message_type);
         return MYSQL_MESSAGE_TYPE_RESPONSE;
     }
 
@@ -117,7 +117,7 @@ static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
         case COM_STMT_RESET:
         case COM_SET_OPTION:
         case COM_STMT_FETCH:
-            bpf_trace_printk("found mysql request");
+            bpf_trace_printk("found mysql request:%u\n", message_type);
             return MYSQL_MESSAGE_TYPE_REQUEST;
         default:
             return CONNECTION_PROTOCOL_UNKNOWN;
