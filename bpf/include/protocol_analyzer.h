@@ -67,14 +67,14 @@
 
 static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
     if (count < 4) {
-        return MYSQL_MESSAGE_TYPE_UNKNOWN;
+        return CONNECTION_PROTOCOL_UNKNOWN;
     }
 
     // 读取包长度
     __u32 packet_length = ((__u8)buf[0]) | (((__u8)buf[1]) << 8) | (((__u8)buf[2]) << 16);
-
+    bpf_trace_printk("packet length : %u\\n", packet_length);
     if (count < packet_length + 4) {
-        return MYSQL_MESSAGE_TYPE_UNKNOWN;
+        return CONNECTION_PROTOCOL_UNKNOWN;
     }
 
     // 读取负载数据的第一个字节来判断消息类型
@@ -82,6 +82,7 @@ static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
 
     // 判断是否为响应类型
     if (message_type == RESPONSE_OK_PACKET || message_type == RESPONSE_ERR_PACKET || message_type == RESPONSE_EOF_PACKET) {
+        bpf_trace_printk("found mysql response");
         return MYSQL_MESSAGE_TYPE_RESPONSE;
     }
 
@@ -116,9 +117,10 @@ static __inline __u32 infer_mysql_message(const char* buf, size_t count) {
         case COM_STMT_RESET:
         case COM_SET_OPTION:
         case COM_STMT_FETCH:
+            bpf_trace_printk("found mysql request");
             return MYSQL_MESSAGE_TYPE_REQUEST;
         default:
-            return MYSQL_MESSAGE_TYPE_UNKNOWN;
+            return CONNECTION_PROTOCOL_UNKNOWN;
     }
 }
 
